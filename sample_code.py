@@ -11,5 +11,5 @@ diff_result = sci_calc.compute_difference(10, 4)
 inherited_result = sci_calc.compute(2, 2)  # inherited from Calculator, not defined here
 print(diff_result, inherited_result)
 
-extra = plus(5, 6)  # a SECOND, separate call site to add() -> fan-in
+extra = add(5, 6, None, None, None, None)  # a SECOND, separate call site to add() -> fan-in
 print(extra)

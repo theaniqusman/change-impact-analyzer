@@ -6,8 +6,12 @@ each one prefixed with a "Content-Length" header (like a tiny web request).
 """
 
 import json
+import select
 import subprocess
+import sys
 from pathlib import Path
+
+READ_TIMEOUT_SECONDS = 30
 
 
 class LspClient:
@@ -23,10 +27,21 @@ class LspClient:
         # only ever fetch it once, no matter how many things resolve there.
         self._document_symbols_cache = {}
         self._file_versions = {}  # uri -> version number, required by didChange
-        # Start the language server as a separate process.
-        # We talk to it through its stdin/stdout pipes.
+        # Start the language server as a separate process. We talk to it
+        # through its stdin/stdout pipes.
+        #
+        # IMPORTANT: use sys.executable (the exact interpreter currently
+        # running this script), not the bare string "python3" - a plain
+        # "python3" depends on PATH lookup, which can silently resolve to a
+        # DIFFERENT Python than the one main.py is actually running under
+        # (one that might not have pylsp installed at all). If that
+        # happened, this subprocess would die instantly on startup, and
+        # since stderr is thrown away below, nothing would ever show an
+        # error - the code waiting to hear back from it would just hang
+        # forever with no explanation. sys.executable guarantees this is
+        # always the same Python that has pylsp installed and working.
         self.server = subprocess.Popen(
-            ["python3", "-m", "pylsp"],
+            [sys.executable, "-m", "pylsp"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -48,8 +63,34 @@ class LspClient:
         self.server.stdin.write(header + body)
         self.server.stdin.flush()
 
+    def _wait_readable(self):
+        """Block until the server's stdout actually has something waiting to
+        be read, or raise TimeoutError if it doesn't within
+        READ_TIMEOUT_SECONDS. Without this, a hung/crashed pylsp process
+        would make readline() block forever with no error and no
+        explanation - exactly the "silent freeze" this is meant to prevent.
+        """
+        ready, _, _ = select.select([self.server.stdout], [], [], READ_TIMEOUT_SECONDS)
+        if not ready:
+            raise TimeoutError(
+                f"pylsp didn't respond within {READ_TIMEOUT_SECONDS} seconds - "
+                f"it may have crashed or hung."
+            )
+
     def _read_message(self):
-        """Read one JSON message from the server (header, blank line, body)."""
+        """Read one JSON message from the server (header, blank line, body).
+
+        Only check readiness ONCE, before the very first read - not before
+        every individual readline()/read() call. Python's buffered stream
+        can pull an entire multi-line response into its own internal buffer
+        in a single underlying read, so a later readline()/read() can return
+        data instantly with nothing NEW arriving at the OS level - a fresh
+        select() at that point can wrongly report "nothing ready" even
+        though the data is already sitting in the buffer, causing a false
+        hang. One check up front is enough to catch a genuinely dead/silent
+        server; it doesn't need repeating once we know bytes are flowing.
+        """
+        self._wait_readable()
         length = 0
         while True:
             line = self.server.stdout.readline().decode()

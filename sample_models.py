@@ -3,7 +3,7 @@ from sample_math import multiply, difference
 
 class Calculator:
     def compute(self, a, b):
-        return multiply(a, b)
+        return multiply(a, b, None, None, None, None)
 
     def compute_twice(self, a, b):
         return self.compute(a, b) + self.compute(a, b)

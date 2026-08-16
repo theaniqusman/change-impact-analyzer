@@ -46,18 +46,21 @@ export OPENAI_API_KEY="your-key-here"
 
 ## Usage
 
-1. Edit a Python file inside this project (or point it at your own project
-   by changing the file discovery in `main.py`), and **save it**. The tool
-   can only see changes that are actually written to disk.
-2. Run it:
+1. **Run it once first**, before making any changes - open `main.py` in
+   VS Code and click the Run button.
 
-   ```bash
-   .venv/bin/python3 main.py
-   ```
-3. A popup window opens. It'll ask which change you mean (if there's more
+   The very first run just establishes a baseline - it commits the current
+   state of the project to git so there's something to compare future
+   edits against. It'll tell you there are no uncommitted changes yet, and
+   that's expected.
+2. Now edit a Python file inside this project (or point it at your own
+   project by changing the file discovery in `main.py`), and **save it**.
+   The tool can only see changes that are actually written to disk.
+3. Click the Run button again.
+4. A popup window opens. It'll ask which change you mean (if there's more
    than one uncommitted file), then walk you through what's affected and
    give you its recommendation.
-4. Answer its yes/no questions in the window - it can revert the change,
+5. Answer its yes/no questions in the window - it can revert the change,
    or fix every other affected piece of code for you.
 
 You can also just type into the popup at any time (e.g. "check the change
