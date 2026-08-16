@@ -6,7 +6,8 @@ agents to explain the risk and fix anything that would break.
 
 ## Architectural Diagram
 
-<img width="1398" height="1488" alt="architectural-diagram" src="https://github.com/user-attachments/assets/4eabe011-91e1-4776-bffe-156a2a88206d" />
+<img width="1398" height="1488" alt="architectural-diagram-v2" src="https://github.com/user-attachments/assets/b3c8da78-ac61-4fc8-abe3-e338006716c3" />
+
 
 ## How it works
 
