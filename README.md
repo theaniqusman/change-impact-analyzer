@@ -4,6 +4,10 @@ Analyzes how a code change will ripple through your codebase before you make
 it, using tree-sitter and a language server for accurate tracing, then LLM
 agents to explain the risk and fix anything that would break.
 
+## Architectural Diagram
+
+<img width="1398" height="1488" alt="architectural-diagram" src="https://github.com/user-attachments/assets/4eabe011-91e1-4776-bffe-156a2a88206d" />
+
 ## How it works
 
 1. **Parses** every Python file in the project with tree-sitter, and
