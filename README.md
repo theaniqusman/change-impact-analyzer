@@ -5,7 +5,6 @@ it, using tree-sitter and a language server for accurate tracing, then LLM
 agents to explain the risk and fix anything that would break.
 
 ## Architectural Diagram
-
 <img width="1398" height="1488" alt="architectural-diagram-v2" src="https://github.com/user-attachments/assets/b3c8da78-ac61-4fc8-abe3-e338006716c3" />
 
 
