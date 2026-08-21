@@ -11,7 +11,7 @@ The diagram below shows how Code Impact Analyzer traces the ripple effects of a 
 
 
 ## How it works
-i
+
 1. **Parses** every Python file in the project with tree-sitter, and
    resolves what calls what using a language server (`pylsp`).
 2. **Detects** whatever you've actually edited and saved, via git.
