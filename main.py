@@ -25,6 +25,7 @@ if Path(sys.prefix).resolve() != _venv_dir:
     if _venv_python.exists():
         os.execv(str(_venv_python), [str(_venv_python), __file__] + sys.argv[1:])
 
+import json
 import re
 import subprocess
 import threading
@@ -78,6 +79,26 @@ def find_enclosing_context(node):
     while current.parent is not None and current.parent.type != "module":
         current = current.parent
     return None, None, current.text.decode()
+
+
+def find_function_in_tree_by_name(tree, name):
+    """Search a tree-sitter tree for a function definition with this exact
+    name, and return (line_0based, source_code) - or None if there isn't
+    one. Used to look up the OLD ("before") version of a function once
+    we've already decided which one the user actually meant.
+    """
+    def search(node):
+        if node.type == "function_definition":
+            name_node = node.child_by_field_name("name")
+            if name_node is not None and name_node.text.decode() == name:
+                return name_node.start_point[0], node.text.decode()
+        for child in node.children:
+            found = search(child)
+            if found:
+                return found
+        return None
+
+    return search(tree.root_node)
 
 
 def find_calls(node, calls):
@@ -270,6 +291,125 @@ def run_pipeline():
         # else: unresolved AND not flagged as undefined - could be an external
         # symbol OR a plain local variable read; either way, nothing to record
 
+    # ---- REAL TOOLS FOR THE FIX AGENT - this is what makes it agentic -------
+    # Everything above (Pass 1, Pass 2, find_blast_radius) is deterministic:
+    # YOUR code decides what to look at, always, the same way every time. The
+    # functions below are different in kind: they're exposed to the LLM as
+    # callable tools, and the MODEL decides, turn by turn, whether it needs to
+    # call one - based on what it's actually unsure about in that specific
+    # case - not because your code forces a fixed lookup every time.
+
+    def find_definition_by_name(name):
+        """Tool: look up a function/class definition by name, anywhere in
+        the project, and return its actual source code. The fix agent calls
+        this itself when it isn't sure a definition still looks the way it
+        assumed - your code never calls this on its own."""
+        for file in PROJECT_FILES:
+            tree = parser.parse(file.read_bytes())
+
+            def search(node):
+                if node.type in ("function_definition", "class_definition"):
+                    name_node = node.child_by_field_name("name")
+                    if name_node is not None and name_node.text.decode() == name:
+                        return file.name, name_node.start_point[0] + 1, node.text.decode()
+                for child in node.children:
+                    found = search(child)
+                    if found:
+                        return found
+                return None
+
+            result = search(tree.root_node)
+            if result:
+                return {"file": result[0], "line": result[1], "code": result[2]}
+        return {"error": f"No definition found for '{name}' anywhere in the project."}
+
+    def find_callers_by_name(name):
+        """Tool: find every call site (from the graph already built above)
+        that calls a function/method with this exact name. The fix agent
+        calls this itself when it wants to double-check who else might be
+        affected before finalizing a fix."""
+        matches = [
+            {"from": edge["from"], "code": edge["caller"][2]}
+            for edge in edges
+            if edge["name"] == name
+        ]
+        if not matches:
+            return {"error": f"No callers of '{name}' found in the graph."}
+        return {"callers": matches}
+
+    FIX_AGENT_TOOLS = [
+        {
+            "type": "function",
+            "function": {
+                "name": "find_definition",
+                "description": "Look up the full current source code of a function or class definition by name, anywhere in the project.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The exact function or class name to look up."},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "find_callers",
+                "description": "Find every place in the project that calls a given function or method, by name.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The exact function or method name to search for callers of."},
+                    },
+                    "required": ["name"],
+                },
+            },
+        },
+    ]
+
+    TOOL_EXECUTORS = {
+        "find_definition": find_definition_by_name,
+        "find_callers": find_callers_by_name,
+    }
+
+    def run_agent_with_tools(messages, max_turns=6):
+        """The actual agentic loop: the model can respond with a request to
+        call a tool instead of answering directly. Your code notices that
+        request, runs the REAL function, and feeds the real result back as
+        a new message - then asks the model again. This repeats until the
+        model is satisfied and gives a normal text answer instead of
+        another tool request (max_turns is just a safety cap against an
+        infinite back-and-forth).
+        """
+        for _ in range(max_turns):
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                tools=FIX_AGENT_TOOLS,
+                timeout=30,
+            )
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                return message.content  # a real answer, not a tool request - done
+
+            messages.append(message.model_dump(exclude_unset=True))
+            for tool_call in message.tool_calls:
+                function_name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+                ui.show_message(f"(double-checking: {function_name}(\"{arguments.get('name', '')}\"))")
+                result = TOOL_EXECUTORS[function_name](**arguments)
+                print(f"[VERIFY: agentic tool call] the model itself requested "
+                      f"{function_name}({arguments}) -> real result: {result}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result),
+                })
+
+        return "(gave up after too many tool calls without a final answer)"
+
     # ---- DETECT A REAL CHANGE, VIA GIT (no more hardcoded old/new snippets) ---
 
     # If this is a brand new repo (no commits yet), make one baseline commit so
@@ -334,12 +474,6 @@ def run_pipeline():
         old_end_byte = len(old_source) - suffix_len
         new_end_byte = len(new_source) - suffix_len
 
-        # Find WHICH function this change actually happened inside - MUST
-        # happen BEFORE old_tree.edit() below, since querying a tree AFTER
-        # .edit() returns broken/inconsistent results.
-        changed_node = old_tree.root_node.descendant_for_byte_range(start_byte, start_byte)
-        function_name, function_line, old_change = find_enclosing_context(changed_node)
-
         old_tree.edit(
             start_byte=start_byte,
             old_end_byte=old_end_byte,
@@ -353,18 +487,89 @@ def run_pipeline():
 
         ui.show_message(f"Looking at the change you made in {changed_relative_path}...")
 
-        if function_name is None:
+        # ---- WHICH FUNCTION(S) DID THIS ACTUALLY TOUCH? -----------------------
+        # A single before/after byte comparison can't tell "you edited two
+        # separate functions" apart from "one big edited region" - if you
+        # change both add() and subtract() in the same save, it'd often just
+        # see one combined span. Ask git directly instead: git diff already
+        # splits unrelated edits into separate "hunks" - one per contiguous
+        # changed region - so we use that to find every distinct function
+        # actually touched, then ask you which one you meant if there's more
+        # than one.
+        diff_output = subprocess.run(
+            ["git", "diff", "--unified=0", "--", changed_relative_path],
+            cwd=HERE, capture_output=True, text=True
+        ).stdout
+
+        hunk_pattern = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+        touched = {}  # function_name -> (function_line_0based, new_code)
+        for line in diff_output.splitlines():
+            match = hunk_pattern.match(line)
+            if not match:
+                continue
+            new_start_line = int(match.group(1))  # 1-based
+            point = (max(new_start_line - 1, 0), 0)
+            node = new_tree.root_node.descendant_for_point_range(point, point)
+            if node is None:
+                continue
+            fn_name, fn_line, fn_code = find_enclosing_context(node)
+            if fn_name is not None:
+                touched[fn_name] = (fn_line, fn_code)
+
+        if not touched:
             ui.show_message(f"That change isn't inside any function in {changed_relative_path}, "
                              f"so there's nothing else in the codebase that could be affected by it.")
             return
+
+        print(f"[VERIFY: multi-function detection] touched functions found via "
+              f"git diff hunks: {list(touched.keys())}")
+
+        if len(touched) == 1:
+            function_name, (function_line, new_change) = next(iter(touched.items()))
+        else:
+            print(f"[VERIFY: disambiguation triggered] more than one function "
+                  f"touched - asking the user which one they mean")
+            which = ui.ask_text(
+                f"You changed more than one function in {changed_relative_path}: "
+                f"{', '.join(touched)}. Which one are you asking about?"
+            )
+            match_prompt = f"""A developer edited multiple functions in one
+file and described which one they mean, in their own words.
+
+FUNCTIONS THEY COULD MEAN:
+{chr(10).join(f"- {name}" for name in touched)}
+
+WHAT THEY SAID:
+{which}
+
+Reply with ONLY the exact function name from the list above that best
+matches what they said - nothing else.
+"""
+            match_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": match_prompt}],
+                timeout=30,
+            )
+            matched_name = match_response.choices[0].message.content.strip()
+            if matched_name not in touched:
+                matched_name = next(iter(touched))
+                ui.show_message(f"Couldn't confidently match that - defaulting to '{matched_name}'.")
+            function_name = matched_name
+            function_line, new_change = touched[function_name]
+            print(f"[VERIFY: disambiguation resolved] the matching agent "
+                  f"picked '{function_name}' out of {list(touched.keys())}")
+            ui.show_message(f"Got it - focusing on '{function_name}'.")
 
         ui.show_message(f"Found it - this is inside your '{function_name}' function.")
 
         CHANGED_LOCATION = f"{CHANGED_FILE.name}:{function_line + 1}"
 
-        # Same lookup, but in the NEW tree, to get the function's new source text
-        new_changed_node = new_tree.root_node.descendant_for_byte_range(start_byte, start_byte)
-        _, _, new_change = find_enclosing_context(new_changed_node)
+        # Look up the OLD ("before") version of this SAME function by name,
+        # in a fresh, unedited parse of old_source - old_tree itself was
+        # already mutated by .edit() above, and querying a tree after
+        # .edit() gives broken/inconsistent results.
+        old_lookup = find_function_in_tree_by_name(parser.parse(old_source), function_name)
+        old_change = old_lookup[1] if old_lookup else "(this function didn't exist before this change)"
 
         affected = find_blast_radius(edges, CHANGED_LOCATION)
         if affected:
@@ -563,21 +768,30 @@ THE CHANGE:
 LOCATIONS THAT NEED FIXING, WITH THEIR CURRENT CODE:
 {fix_targets_summary}
 
-For EVERY location above that genuinely needs to change to keep working,
-output a block in EXACTLY this format (one block per location, nothing
-else between the markers, copy the LOCATION text exactly as shown):
+You have two tools available: find_definition (look up a function/class's
+actual current source by name) and find_callers (find everyone who calls a
+given name). Use them yourself, as many or as few times as YOU decide,
+whenever you're not fully confident a fix is correct as-is - for example if
+a location depends on something whose exact current shape you're not
+certain of. Don't use them if you're already confident; only check what you
+personally aren't sure about.
+
+Once you're confident, for EVERY location above that genuinely needs to
+change to keep working, output a block in EXACTLY this format (one block
+per location, nothing else between the markers, copy the LOCATION text
+exactly as shown):
 FIX_START <location>
 <the complete corrected version of that code>
 FIX_END
 Skip any location that doesn't actually need a change.
 """
 
-        fix_response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": fix_prompt}],
-            timeout=30,
-        )
-        fix_text = fix_response.choices[0].message.content
+        # This is the one genuinely agentic part of the pipeline: the model
+        # itself decides, turn by turn, whether it needs to call
+        # find_definition/find_callers before answering - your code doesn't
+        # force any lookup, it just runs whichever ones the model actually
+        # asks for (see run_agent_with_tools above).
+        fix_text = run_agent_with_tools([{"role": "user", "content": fix_prompt}])
 
         # FIX_START/FIX_END is an internal format for us to parse reliably -
         # not something to show the user as-is, so don't dump fix_text
