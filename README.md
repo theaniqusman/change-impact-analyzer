@@ -7,7 +7,7 @@ agents to explain the risk and fix anything that would break.
 ## Architectural Diagram
 The diagram below shows how Code Impact Analyzer traces the ripple effects of a code change before any AI gets involved. Tree-sitter and a language server build a dependency graph of your codebase up front, so figuring out what's affected by an edit is a local, deterministic lookup with no API cost. Only the specific slice of code affected by your change ever gets passed to an LLM, and it never sees anything else in your project. If you changed more than one function in the same file, you'll be asked which one you meant before it continues. The fix agent decides for itself what extra information it needs before answering, rather than being handed everything upfront.
 
-<img width="1396" height="1488" alt="architectural-diagram-v4" src="https://github.com/user-attachments/assets/8a5fd3f6-521e-41c8-bacb-e7ea61581edb" />
+<img width="1396" height="1194" alt="architectural-diagram-v4" src="https://github.com/user-attachments/assets/8a5fd3f6-521e-41c8-bacb-e7ea61581edb" />
 
 
 ## How it works
